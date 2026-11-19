@@ -1,18 +1,13 @@
 import { NextResponse } from 'next/server';
 
-const MODELS = ['gemini-3.8-flash', 'gemini-3.8-flash-lite', 'gemini-2.5-flash'];
+const GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.8-flash-lite', 'gemini-3.5-flash'];
 
 export async function POST(req: Request) {
   try {
     const { prompt, device_status } = await req.json();
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json(
-        { reply: 'GEMINI_API_KEY belum terbaca di Vercel, Bos.', action: 'none', payload: '' },
-        { status: 500 }
-      );
-    }
+    const geminiKey = process.env.GEMINI_API_KEY;
+    const groqKey = process.env.GROQ_API_KEY;
 
     const systemInstruction = `
 Kamu adalah J.A.R.V.I.S., asisten pribadi yang cerdas, ringkas, santai tapi cekatan. Panggil user dengan "Bos".
@@ -25,56 +20,79 @@ Balas HANYA dalam format JSON valid tanpa markdown backtick:
 Status HP saat ini: ${JSON.stringify(device_status || {})}
 `;
 
-    let lastError = 'Semua model sedang sibuk.';
+    let lastError = 'Jalur otak sibuk.';
 
-    for (const model of MODELS) {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 7000);
+    // 1. Coba jalur utama: Gemini
+    if (geminiKey) {
+      for (const model of GEMINI_MODELS) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000);
 
-      try {
-        const res = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            signal: controller.signal,
-            body: JSON.stringify({
-              contents: [{ role: 'user', parts: [{ text: `${systemInstruction}\n\nPerintah Bos: ${prompt}` }] }],
-              generationConfig: {
-                responseMimeType: 'application/json',
-                thinkingConfig: { thinkingBudget: 0 }
-              }
-            })
+        try {
+          const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              signal: controller.signal,
+              body: JSON.stringify({
+                contents: [{ role: 'user', parts: [{ text: `${systemInstruction}\n\nPerintah Bos: ${prompt}` }] }],
+                generationConfig: {
+                  responseMimeType: 'application/json',
+                  thinkingConfig: { thinkingBudget: 0 }
+                }
+              })
+            }
+          );
+
+          clearTimeout(timeoutId);
+          const data = await res.json();
+
+          if (!res.ok) {
+            lastError = `Gemini ${model} (${res.status})`;
+            continue;
           }
-        );
 
-        clearTimeout(timeoutId);
-        const data = await res.json();
-
-        // Kalau model ini lagi penuh (503) atau kena limit (429), lanjut ke model cadangan berikutnya
-        if (res.status === 503 || res.status === 429) {
-          lastError = `Model ${model} sibuk (${res.status})`;
+          const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (rawText) {
+            return NextResponse.json(JSON.parse(rawText));
+          }
+        } catch (e: any) {
+          clearTimeout(timeoutId);
+          lastError = e?.name === 'AbortError' ? `Gemini ${model} timeout` : e?.message;
           continue;
         }
-
-        if (!res.ok) {
-          lastError = `Error ${model} (${res.status}): ${data.error?.message || 'Gagal'}`;
-          continue;
-        }
-
-        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (rawText) {
-          return NextResponse.json(JSON.parse(rawText));
-        }
-      } catch (e: any) {
-        clearTimeout(timeoutId);
-        lastError = e?.name === 'AbortError' ? `${model} timeout` : e?.message;
-        continue;
       }
     }
 
+    // 2. Jalur cadangan instan (0.3 detik): Groq Llama 3.3 70B
+    if (groqKey) {
+      const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${groqKey}`
+        },
+        body: JSON.stringify({
+          model: 'llama-3.3-70b-versatile',
+          response_format: { type: 'json_object' },
+          messages: [
+            { role: 'system', content: systemInstruction },
+            { role: 'user', content: prompt }
+          ]
+        })
+      });
+
+      const groqData = await groqRes.json();
+      const groqText = groqData.choices?.[0]?.message?.content;
+      if (groqRes.ok && groqText) {
+        return NextResponse.json(JSON.parse(groqText));
+      }
+      lastError += ` | Groq (${groqRes.status}): ${groqData.error?.message || 'Gagal'}`;
+    }
+
     return NextResponse.json(
-      { reply: `Maaf Bos, semua jalur otak lagi padat (${lastError}).`, action: 'none', payload: '' },
+      { reply: `Maaf Bos, semua server AI lagi penuh (${lastError}).`, action: 'none', payload: '' },
       { status: 503 }
     );
   } catch (err: any) {
