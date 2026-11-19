@@ -4,8 +4,16 @@ export async function POST(req: Request) {
   try {
     const { prompt, device_status } = await req.json();
 
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return NextResponse.json(
+        { reply: 'GEMINI_API_KEY belum terbaca di Vercel, Bos.', action: 'none', payload: '' },
+        { status: 500 }
+      );
+    }
+
     const systemInstruction = `
-Kamu adalah J.A.R.V.I.S., asisten pribadi yang cerdas, ringkas, santai tapi cekatan. Panggil user dengan "Tuan".
+Kamu adalah J.A.R.V.I.S., asisten pribadi yang cerdas, ringkas, santai tapi cekatan. Panggil user dengan "Bos".
 Balas HANYA dalam format JSON valid tanpa markdown backtick:
 {
   "reply": "Kalimat jawaban singkat untuk diucapkan lewat speaker (maksimal 2-3 kalimat natural)",
@@ -16,7 +24,7 @@ Status HP saat ini: ${JSON.stringify(device_status || {})}
 `;
 
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -28,9 +36,31 @@ Status HP saat ini: ${JSON.stringify(device_status || {})}
     );
 
     const data = await res.json();
-    const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '{"reply":"Maaf Bos, otak cloud sedang gangguan.","action":"none","payload":""}';
+
+    if (!res.ok) {
+      return NextResponse.json(
+        {
+          reply: `Error Gemini (${res.status}): ${data.error?.message || 'Gagal memproses'}`,
+          action: 'none',
+          payload: ''
+        },
+        { status: res.status }
+      );
+    }
+
+    const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!rawText) {
+      return NextResponse.json(
+        { reply: 'Maaf Bos, respons Gemini kosong.', action: 'none', payload: '' },
+        { status: 500 }
+      );
+    }
+
     return NextResponse.json(JSON.parse(rawText));
-  } catch (err) {
-    return NextResponse.json({ reply: 'Terjadi kesalahan koneksi di server Vercel, Bos.', action: 'none', payload: '' }, { status: 500 });
+  } catch (err: any) {
+    return NextResponse.json(
+      { reply: `Error server: ${err?.message || 'Unknown error'}`, action: 'none', payload: '' },
+      { status: 500 }
+    );
   }
 }
