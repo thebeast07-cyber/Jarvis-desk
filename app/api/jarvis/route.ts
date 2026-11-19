@@ -1,6 +1,12 @@
 import { NextResponse } from 'next/server';
 
-const GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.8-flash-lite', 'gemini-3.5-flash'];
+const GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.8-flash-lite'];
+const PREFERRED_GROQ_MODELS = [
+  'meta-llama/llama-4-scout-17b-16e-instruct',
+  'meta-llama/llama-4-maverick-17b-128e-instruct',
+  'llama-3.1-8b-instant',
+  'qwen-qwq-32b'
+];
 
 export async function POST(req: Request) {
   try {
@@ -22,11 +28,11 @@ Status HP saat ini: ${JSON.stringify(device_status || {})}
 
     let lastError = 'Jalur otak sibuk.';
 
-    // 1. Coba jalur utama: Gemini
+    // 1. Coba jalur utama: Gemini (timeout cepat 4 detik)
     if (geminiKey) {
       for (const model of GEMINI_MODELS) {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 6000);
+        const timeoutId = setTimeout(() => controller.abort(), 4000);
 
         try {
           const res = await fetch(
@@ -48,47 +54,59 @@ Status HP saat ini: ${JSON.stringify(device_status || {})}
           clearTimeout(timeoutId);
           const data = await res.json();
 
-          if (!res.ok) {
-            lastError = `Gemini ${model} (${res.status})`;
-            continue;
+          if (res.ok && data.candidates?.[0]?.content?.parts?.[0]?.text) {
+            return NextResponse.json(JSON.parse(data.candidates[0].content.parts[0].text));
           }
-
-          const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (rawText) {
-            return NextResponse.json(JSON.parse(rawText));
-          }
+          lastError = `Gemini ${model} (${res.status})`;
         } catch (e: any) {
           clearTimeout(timeoutId);
           lastError = e?.name === 'AbortError' ? `Gemini ${model} timeout` : e?.message;
-          continue;
         }
       }
     }
 
-    // 2. Jalur cadangan instan (0.3 detik): Groq Llama 3.3 70B
+    // 2. Jalur cadangan instan: Groq (auto-detect model aktif jika list utama 404)
     if (groqKey) {
-      const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${groqKey}`
-        },
-        body: JSON.stringify({
-          model: 'llama-3.3-70b-versatile',
-          response_format: { type: 'json_object' },
-          messages: [
-            { role: 'system', content: systemInstruction },
-            { role: 'user', content: prompt }
-          ]
-        })
-      });
+      let candidateModels = [...PREFERRED_GROQ_MODELS];
 
-      const groqData = await groqRes.json();
-      const groqText = groqData.choices?.[0]?.message?.content;
-      if (groqRes.ok && groqText) {
-        return NextResponse.json(JSON.parse(groqText));
+      // Tarik daftar model aktif langsung dari akun Groq lu
+      try {
+        const listRes = await fetch('https://api.groq.com/openai/v1/models', {
+          headers: { Authorization: `Bearer ${groqKey}` }
+        });
+        if (listRes.ok) {
+          const listData = await listRes.json();
+          const activeIds: string[] = (listData.data || [])
+            .map((m: any) => m.id)
+            .filter((id: string) => !id.includes('whisper') && !id.includes('guard') && !id.includes('tts'));
+          candidateModels = [...new Set([...PREFERRED_GROQ_MODELS, ...activeIds])];
+        }
+      } catch {}
+
+      for (const gModel of candidateModels) {
+        const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${groqKey}`
+          },
+          body: JSON.stringify({
+            model: gModel,
+            response_format: { type: 'json_object' },
+            messages: [
+              { role: 'system', content: systemInstruction },
+              { role: 'user', content: prompt }
+            ]
+          })
+        });
+
+        const groqData = await groqRes.json();
+        const groqText = groqData.choices?.[0]?.message?.content;
+        if (groqRes.ok && groqText) {
+          return NextResponse.json(JSON.parse(groqText));
+        }
+        lastError = `Groq ${gModel} (${groqRes.status}): ${groqData.error?.message || 'Gagal'}`;
       }
-      lastError += ` | Groq (${groqRes.status}): ${groqData.error?.message || 'Gagal'}`;
     }
 
     return NextResponse.json(
