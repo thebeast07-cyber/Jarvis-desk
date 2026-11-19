@@ -23,18 +23,26 @@ Balas HANYA dalam format JSON valid tanpa markdown backtick:
 Status HP saat ini: ${JSON.stringify(device_status || {})}
 `;
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           contents: [{ role: 'user', parts: [{ text: `${systemInstruction}\n\nPerintah Bos: ${prompt}` }] }],
-          generationConfig: { responseMimeType: 'application/json' }
+          generationConfig: {
+            responseMimeType: 'application/json',
+            thinkingConfig: { thinkingBudget: 0 }
+          }
         })
       }
     );
 
+    clearTimeout(timeoutId);
     const data = await res.json();
 
     if (!res.ok) {
@@ -59,7 +67,7 @@ Status HP saat ini: ${JSON.stringify(device_status || {})}
     return NextResponse.json(JSON.parse(rawText));
   } catch (err: any) {
     return NextResponse.json(
-      { reply: `Error server: ${err?.message || 'Unknown error'}`, action: 'none', payload: '' },
+      { reply: `Error server: ${err?.name === 'AbortError' ? 'Gemini timeout > 8 detik' : err?.message}`, action: 'none', payload: '' },
       { status: 500 }
     );
   }
