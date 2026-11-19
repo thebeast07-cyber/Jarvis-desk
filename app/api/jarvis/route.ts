@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
 
+const MODELS = ['gemini-3.8-flash', 'gemini-3.8-flash-lite', 'gemini-2.5-flash'];
+
 export async function POST(req: Request) {
   try {
     const { prompt, device_status } = await req.json();
@@ -23,51 +25,61 @@ Balas HANYA dalam format JSON valid tanpa markdown backtick:
 Status HP saat ini: ${JSON.stringify(device_status || {})}
 `;
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    let lastError = 'Semua model sedang sibuk.';
 
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: controller.signal,
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: `${systemInstruction}\n\nPerintah Bos: ${prompt}` }] }],
-          generationConfig: {
-            responseMimeType: 'application/json',
-            thinkingConfig: { thinkingBudget: 0 }
+    for (const model of MODELS) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 7000);
+
+      try {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: `${systemInstruction}\n\nPerintah Bos: ${prompt}` }] }],
+              generationConfig: {
+                responseMimeType: 'application/json',
+                thinkingConfig: { thinkingBudget: 0 }
+              }
+            })
           }
-        })
+        );
+
+        clearTimeout(timeoutId);
+        const data = await res.json();
+
+        // Kalau model ini lagi penuh (503) atau kena limit (429), lanjut ke model cadangan berikutnya
+        if (res.status === 503 || res.status === 429) {
+          lastError = `Model ${model} sibuk (${res.status})`;
+          continue;
+        }
+
+        if (!res.ok) {
+          lastError = `Error ${model} (${res.status}): ${data.error?.message || 'Gagal'}`;
+          continue;
+        }
+
+        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (rawText) {
+          return NextResponse.json(JSON.parse(rawText));
+        }
+      } catch (e: any) {
+        clearTimeout(timeoutId);
+        lastError = e?.name === 'AbortError' ? `${model} timeout` : e?.message;
+        continue;
       }
+    }
+
+    return NextResponse.json(
+      { reply: `Maaf Bos, semua jalur otak lagi padat (${lastError}).`, action: 'none', payload: '' },
+      { status: 503 }
     );
-
-    clearTimeout(timeoutId);
-    const data = await res.json();
-
-    if (!res.ok) {
-      return NextResponse.json(
-        {
-          reply: `Error Gemini (${res.status}): ${data.error?.message || 'Gagal memproses'}`,
-          action: 'none',
-          payload: ''
-        },
-        { status: res.status }
-      );
-    }
-
-    const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!rawText) {
-      return NextResponse.json(
-        { reply: 'Maaf Bos, respons Gemini kosong.', action: 'none', payload: '' },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json(JSON.parse(rawText));
   } catch (err: any) {
     return NextResponse.json(
-      { reply: `Error server: ${err?.name === 'AbortError' ? 'Gemini timeout > 8 detik' : err?.message}`, action: 'none', payload: '' },
+      { reply: `Error server: ${err?.message || 'Unknown error'}`, action: 'none', payload: '' },
       { status: 500 }
     );
   }
